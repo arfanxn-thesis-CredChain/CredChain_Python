@@ -6,7 +6,7 @@
 
 # Pre-push gate: lint + typecheck + tests, run inside the container (no host venv).
 check:
-	docker compose run --rm python sh -c "ruff check && mypy app/ tests/ && pytest tests/ -v"
+	docker compose run --build --rm -v "$(CURDIR)/tests:/app/tests:ro" python sh -c "pip install --no-cache-dir -e '.[dev]' && ruff check && mypy app/ tests/ && pytest tests/ -v"
 
 format:
 	docker compose run --rm python ruff format .

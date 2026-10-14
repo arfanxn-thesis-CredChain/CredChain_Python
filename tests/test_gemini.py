@@ -199,6 +199,28 @@ class TestGeminiClient:
         assert name == "doc.pdf"
         assert raw_dict == {"raw_text": "extracted", "ids": []}
 
+    @pytest.mark.parametrize("filename", ["scan.tif", "scan.TIF", "scan.tiff"])
+    def test_extract_with_files_api_uploads_tiff_mime(
+        self, mock_genai_client, filename, monkeypatch
+    ):
+        client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
+        mock_uploaded_file = MagicMock()
+        mock_uploaded_file.name = "files/abc"
+        mock_genai_client.files.upload.return_value = mock_uploaded_file
+        mock_file_info = MagicMock()
+        mock_file_info.state = "ACTIVE"
+        mock_file_info.uri = "https://example.com/file"
+        mock_file_info.mime_type = "image/tiff"
+        mock_genai_client.files.get.return_value = mock_file_info
+        mock_genai_client.models.generate_content.return_value.text = "{}"
+        monkeypatch.setattr("app.gemini.time.sleep", lambda _: None)
+
+        client.extract_with_files_api({filename: b"tiff bytes"}, "extract prompt")
+
+        config = mock_genai_client.files.upload.call_args.kwargs["config"]
+        assert config.mime_type == "image/tiff"
+        assert config.display_name == filename
+
     def test_extract_with_files_api_handles_failure(self, mock_genai_client):
         client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
 

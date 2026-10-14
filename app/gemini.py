@@ -17,6 +17,7 @@ MIME_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
+    ".tif": "image/tiff",
     ".tiff": "image/tiff",
     ".webp": "image/webp",
     ".pdf": "application/pdf",

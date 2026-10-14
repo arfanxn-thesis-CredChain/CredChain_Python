@@ -44,7 +44,7 @@ def validate_file(file: UploadFile) -> tuple[bytes, str]:
 
 def parse_embeddings(raw: str, expected_len: int) -> list[list[float]]:
     try:
-        parsed: list = json.loads(raw)
+        parsed: list[Any] = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise AppError(
             codes.CODE_AI_VERIFY_INVALID_INPUT,
