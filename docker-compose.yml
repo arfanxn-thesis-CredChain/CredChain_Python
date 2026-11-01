@@ -4,12 +4,18 @@ services:
       context: .
     image: arfanxn/credchain-python:latest
     container_name: python
+    restart: unless-stopped
     env_file:
       - .env.docker
     ports:
       - "127.0.0.1:8081:8081"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
     networks:
       - credchain
+
+volumes:
+  hf_cache:
 
 networks:
   credchain:
