@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app import codes
+from app.errors import AppError
 from app.gemini import GeminiClient
 
 
@@ -24,25 +26,35 @@ class TestGeminiClient:
 
         assert result == {"raw_text": "Hello", "ids": []}
 
-    def test_extract_document_empty_response_returns_empty_dict(self, mock_genai_client):
+    def test_extract_document_empty_response_raises_app_error(self, mock_genai_client):
         client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
         mock_response = MagicMock()
         mock_response.text = None
         mock_genai_client.models.generate_content.return_value = mock_response
 
-        result = client._extract_document(["test content"])
+        with pytest.raises(AppError) as exc:
+            client._extract_document(["test content"])
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
 
-        assert result == {}
-
-    def test_extract_document_invalid_json_returns_empty_dict(self, mock_genai_client):
+    def test_extract_document_invalid_json_raises_app_error(self, mock_genai_client):
         client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
         mock_response = MagicMock()
         mock_response.text = "not json"
         mock_genai_client.models.generate_content.return_value = mock_response
 
-        result = client._extract_document(["test content"])
+        with pytest.raises(AppError) as exc:
+            client._extract_document(["test content"])
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
 
-        assert result == {}
+    def test_extract_document_non_dict_json_raises_app_error(self, mock_genai_client):
+        client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
+        mock_response = MagicMock()
+        mock_response.text = json.dumps(["an", "array"])
+        mock_genai_client.models.generate_content.return_value = mock_response
+
+        with pytest.raises(AppError) as exc:
+            client._extract_document(["test content"])
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
 
     def test_extract_document_with_retry_succeeds(self, mock_genai_client):
         client = GeminiClient(
@@ -58,7 +70,7 @@ class TestGeminiClient:
 
     def test_extract_document_with_retry_handles_rate_limit(self, mock_genai_client):
         client = GeminiClient(
-            mock_genai_client, extraction_model="gemini-test", retry_wait_seconds=0
+            mock_genai_client, extraction_model="gemini-test", retry_wait_seconds=0, max_retries=3
         )
         call_count = [0]
 
@@ -76,6 +88,21 @@ class TestGeminiClient:
 
         assert result == {"raw_text": "retry ok"}
         assert call_count[0] == 3
+
+    def test_extract_retry_bounded_wait_and_attempts(self, mock_genai_client, monkeypatch):
+        sleep_calls = []
+        monkeypatch.setattr("app.gemini.time.sleep", lambda s: sleep_calls.append(s))
+        client = GeminiClient(
+            mock_genai_client, extraction_model="gemini-test", retry_wait_seconds=2, max_retries=2
+        )
+        mock_genai_client.models.generate_content.side_effect = Exception("429 RESOURCE_EXHAUSTED")
+
+        with pytest.raises(RuntimeError, match="Max retries exceeded"):
+            client._extract_document_with_retry(["test content"])
+
+        # Retries once: attempt 0 sleeps 2s, attempt 1 fails and exits without sleeping
+        assert len(sleep_calls) == 1
+        assert sleep_calls[0] == 2
 
     def test_extract_document_with_retry_exhausts(self, mock_genai_client):
         client = GeminiClient(
@@ -134,6 +161,30 @@ class TestGeminiClient:
 
         assert result == []
 
+    def test_extract_ids_direct_missing_ids_key_raises_app_error(self, mock_genai_client):
+        client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({"raw_text": "no ids key"})
+        mock_genai_client.models.generate_content.return_value = mock_response
+
+        with pytest.raises(AppError) as exc:
+            client.extract_ids_direct(
+                file_bytes=b"fake image", mime_type="image/jpeg", prompt="extract ids"
+            )
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
+
+    def test_extract_ids_direct_non_list_ids_raises_app_error(self, mock_genai_client):
+        client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({"ids": "not a list"})
+        mock_genai_client.models.generate_content.return_value = mock_response
+
+        with pytest.raises(AppError) as exc:
+            client.extract_ids_direct(
+                file_bytes=b"fake image", mime_type="image/jpeg", prompt="extract ids"
+            )
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
+
     def test_upload_file(self, mock_genai_client):
         client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
         mock_file = MagicMock()
@@ -169,6 +220,20 @@ class TestGeminiClient:
 
         with pytest.raises(RuntimeError, match="failed processing"):
             client.poll_until_active(mock_file)
+
+    def test_poll_until_active_times_out(self, mock_genai_client, monkeypatch):
+        client = GeminiClient(mock_genai_client, extraction_model="gemini-test")
+        mock_file = MagicMock()
+        mock_file.name = "files/abc"
+        mock_file_info = MagicMock()
+        mock_file_info.state = "PROCESSING"
+        mock_genai_client.files.get.return_value = mock_file_info
+        monkeypatch.setattr("app.gemini.time.sleep", lambda _: None)
+
+        with pytest.raises(AppError) as exc:
+            client.poll_until_active(mock_file, timeout_seconds=0.01)
+        assert exc.value.code == codes.CODE_AI_GEMINI_FAILED
+        assert "timed out" in exc.value.message
 
     def test_extract_with_files_api(self, mock_genai_client):
         client = GeminiClient(mock_genai_client, extraction_model="gemini-test")

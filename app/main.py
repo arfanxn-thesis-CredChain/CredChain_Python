@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from google import genai
+from google.genai import types
 from huggingface_hub import login as hf_login
 from sentence_transformers import SentenceTransformer
 from slowapi.errors import RateLimitExceeded
@@ -42,11 +43,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.models_loaded = False
 
     hf_login(token=settings.hf_token)
-    app.state.gemini_raw_client = genai.Client(api_key=settings.gemini_api_key)
+    app.state.gemini_raw_client = genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=types.HttpOptions(timeout=settings.gemini_timeout_ms),
+    )
     app.state.gemini_client = GeminiClient(
         app.state.gemini_raw_client,
         extraction_model=settings.extraction_model,
         retry_wait_seconds=settings.retry_wait_seconds,
+        max_retries=settings.max_retries,
+        file_poll_timeout_seconds=settings.file_poll_timeout_seconds,
     )
 
     log.info(

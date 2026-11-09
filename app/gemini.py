@@ -13,6 +13,9 @@ from typing import Any, cast
 from google import genai
 from google.genai import types
 
+from app import codes
+from app.errors import AppError
+
 MIME_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -29,13 +32,15 @@ class GeminiClient:
         self,
         client: genai.Client,
         extraction_model: str,
-        retry_wait_seconds: int = 60,
-        max_retries: int = 3,
+        retry_wait_seconds: int = 2,
+        max_retries: int = 2,
+        file_poll_timeout_seconds: int = 20,
     ) -> None:
         self._client = client
         self._extraction_model = extraction_model
         self._retry_wait_seconds = retry_wait_seconds
         self._max_retries = max_retries
+        self._file_poll_timeout_seconds = file_poll_timeout_seconds
 
     # ── Direct upload (used by /verify and /extract-ids) ────
 
@@ -52,7 +57,10 @@ class GeminiClient:
         self, file_bytes: bytes, mime_type: str, prompt: str
     ) -> list[dict[str, str]]:
         raw = self.extract_direct(file_bytes, mime_type, prompt)
-        return cast(list[dict[str, str]], raw.get("ids", []))
+        ids = raw.get("ids")
+        if not isinstance(ids, list):
+            raise AppError(codes.CODE_AI_GEMINI_FAILED, "Malformed IDs payload from Gemini")
+        return cast(list[dict[str, str]], ids)
 
     # ── Files API (used by /extract for batch uploads) ──────
 
@@ -66,14 +74,40 @@ class GeminiClient:
             ),
         )
 
-    def poll_until_active(self, file: types.File) -> types.File:
+    def poll_until_active(
+        self, file: types.File, timeout_seconds: int | float | None = None
+    ) -> types.File:
+        timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._file_poll_timeout_seconds
+        )
+        start = time.monotonic()
         while True:
             info = self._client.files.get(name=file.name or "")
             if info.state == "ACTIVE":
                 return info
             if info.state == "FAILED":
                 raise RuntimeError(f"File '{file.name}' failed processing")
+            if time.monotonic() - start > timeout:
+                raise AppError(
+                    codes.CODE_AI_GEMINI_FAILED,
+                    f"File '{file.name}' processing timed out",
+                )
             time.sleep(1)
+
+    def extract_file_with_files_api(
+        self, file_bytes: bytes, mime_type: str, display_name: str, prompt: str,
+    ) -> dict[str, Any]:
+        f = self.upload_file(file_bytes, mime_type, display_name)
+        info = self.poll_until_active(f)
+        contents = [
+            types.Part.from_uri(
+                file_uri=info.uri or "", mime_type=info.mime_type or "",
+            ),
+            types.Part.from_text(text=prompt),
+        ]
+        return self._extract_document_with_retry(contents)
 
     def extract_with_files_api(
         self, file_dict: dict[str, bytes], prompt: str,
@@ -117,13 +151,18 @@ class GeminiClient:
                 response_mime_type="application/json"
             ),
         )
-        if not response.text:
-            return {}
+        if not response.text or not response.text.strip():
+            raise AppError(codes.CODE_AI_GEMINI_FAILED, "Empty response from Gemini")
         try:
-            return cast(dict[str, Any], json.loads(response.text))
-        except json.JSONDecodeError:
+            parsed = json.loads(response.text)
+        except json.JSONDecodeError as exc:
             print(f"  Warning: Gemini returned non-JSON: {response.text[:200]}")
-            return {}
+            raise AppError(
+                codes.CODE_AI_GEMINI_FAILED, "Invalid JSON response from Gemini"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise AppError(codes.CODE_AI_GEMINI_FAILED, "Invalid JSON object response from Gemini")
+        return cast(dict[str, Any], parsed)
 
     def _extract_document_with_retry(
         self, contents: list[Any], max_retries: int | None = None,
@@ -135,11 +174,12 @@ class GeminiClient:
             except Exception as e:
                 msg = str(e)
                 if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                    print(
-                        f"  Rate limited — retrying in {self._retry_wait_seconds}s "
-                        f"(attempt {attempt + 1}/{max_retries})"
-                    )
-                    time.sleep(self._retry_wait_seconds)
+                    if attempt + 1 < max_retries:
+                        print(
+                            f"  Rate limited — retrying in {self._retry_wait_seconds}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(self._retry_wait_seconds)
                 else:
                     raise
         raise RuntimeError("Max retries exceeded")

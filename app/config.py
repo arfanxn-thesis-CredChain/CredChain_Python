@@ -65,7 +65,10 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     extraction_model: str = "gemini-3.1-flash-lite"
-    retry_wait_seconds: int = 60
+    retry_wait_seconds: int = 2
+    max_retries: int = 2
+    gemini_timeout_ms: int = 20000
+    file_poll_timeout_seconds: int = 20
 
     hf_token: str = ""
     embedding_model_id: str = "google/embeddinggemma-300M"

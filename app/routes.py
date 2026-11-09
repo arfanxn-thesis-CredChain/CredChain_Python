@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -45,7 +46,7 @@ def validate_file(file: UploadFile) -> tuple[bytes, str]:
 def parse_embeddings(raw: str, expected_len: int) -> list[list[float]]:
     try:
         parsed: list[Any] = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
         raise AppError(
             codes.CODE_AI_VERIFY_INVALID_INPUT,
             errors={"embeddings": [str(exc)]},
@@ -69,7 +70,22 @@ def parse_embeddings(raw: str, expected_len: int) -> list[list[float]]:
                 codes.CODE_AI_VERIFY_INVALID_INPUT,
                 errors={f"embeddings.{i}": ["Must be a list of floats"]},
             )
-        result.append([float(x) for x in v])
+        row: list[float] = []
+        for j, x in enumerate(v):
+            try:
+                val = float(x)
+            except (ValueError, TypeError) as exc:
+                raise AppError(
+                    codes.CODE_AI_VERIFY_INVALID_INPUT,
+                    errors={f"embeddings.{i}.{j}": [f"Invalid float: {x}"]},
+                ) from exc
+            if not math.isfinite(val):
+                raise AppError(
+                    codes.CODE_AI_VERIFY_INVALID_INPUT,
+                    errors={f"embeddings.{i}.{j}": ["Float must be finite (not NaN or Inf)"]},
+                )
+            row.append(val)
+        result.append(row)
     return result
 
 
@@ -110,41 +126,30 @@ async def extract(
     errors: dict[str, list[str]] = {}
     success_count = 0
 
-    file_dict: dict[str, bytes] = {}
-    file_map: dict[str, int] = {}
     for i, file in enumerate(files):
         try:
-            contents, _ = validate_file(file)
-            name = file.filename or f"file_{i}"
-            file_dict[name] = contents
-            file_map[name] = i
+            contents, mime_type = validate_file(file)
+            display_name = file.filename or f"file_{i}"
+            raw = await asyncio.to_thread(
+                gemini_client.extract_file_with_files_api,
+                contents,
+                mime_type,
+                display_name,
+                PROMPT_EXTRACT_DOCUMENT,
+            )
+            raw_text = raw.get("raw_text", "")
+            ids = raw.get("ids", [])
+            emb = await asyncio.to_thread(emb_mod.encode, embed_model, raw_text)
+            data[i] = schemas.ExtractData(text=raw_text, ids=ids, embedding=emb)
+            success_count += 1
         except AppError as exc:
             errors[f"files.{i}"] = [exc.message]
-
-    if file_dict:
-        try:
-            results = await asyncio.to_thread(
-                gemini_client.extract_with_files_api, file_dict, PROMPT_EXTRACT_DOCUMENT
-            )
-            result_map: dict[int, tuple[str, dict[str, Any]]] = {}
-            for name, raw in results:
-                result_map[file_map[name]] = (name, raw)
-
-            for i in range(n):
-                if i in result_map:
-                    _, raw = result_map[i]
-                    raw_text = raw.get("raw_text", "")
-                    ids = raw.get("ids", [])
-                    emb = await asyncio.to_thread(emb_mod.encode, embed_model, raw_text)
-                    data[i] = schemas.ExtractData(text=raw_text, ids=ids, embedding=emb)
-                    success_count += 1
-                else:
-                    errors.setdefault(f"files.{i}", []).append("Gemini extraction failed")
         except Exception:
-            log.exception("Gemini extraction failed")
-            for i in range(n):
-                if f"files.{i}" not in errors:
-                    errors[f"files.{i}"] = ["Internal error processing file"]
+            log.exception(
+                "unhandled per-file error in extract",
+                extra={"extra_fields": {"file_index": i, "filename": file.filename}},
+            )
+            errors[f"files.{i}"] = ["Internal error processing file"]
 
     code = codes.CODE_AI_EXTRACT_SUCCESS if success_count > 0 else codes.CODE_AI_GEMINI_FAILED
     message = (
@@ -168,6 +173,7 @@ async def verify(
     data: list[schemas.VerifyData | None] = []
     errors: dict[str, list[str]] = {}
     success_count = 0
+    technical_failure = False
 
     for i, (file, stored_embedding) in enumerate(zip(files, stored, strict=True)):
         try:
@@ -193,15 +199,22 @@ async def verify(
         except AppError as exc:
             data.append(None)
             errors[f"files.{i}"] = [exc.message]
+            if exc.code not in {codes.CODE_AI_VALIDATION, codes.CODE_AI_VERIFY_OCR_FAILED}:
+                technical_failure = True
         except Exception:
             data.append(None)
+            technical_failure = True
             log.exception(
                 "unhandled per-file error",
                 extra={"extra_fields": {"file_index": i, "filename": file.filename}},
             )
             errors[f"files.{i}"] = ["Internal error processing file"]
 
-    code = codes.CODE_AI_VERIFY_SUCCESS if success_count > 0 else codes.CODE_AI_VERIFY_OCR_FAILED
+    code = (
+        codes.CODE_AI_VERIFY_SUCCESS if success_count > 0
+        else codes.CODE_AI_GEMINI_FAILED if technical_failure
+        else codes.CODE_AI_VERIFY_OCR_FAILED
+    )
     message = (
         "Verification(s) completed"
         if success_count == len(files)
