@@ -2,11 +2,11 @@
 
 Internal FastAPI service for document OCR, field extraction (Gemini), semantic similarity (EmbeddingGemma), and bilingual description rendering.
 
-Not for public exposure. Reachable only inside the Docker `backend` network at `http://python:8081`.
+Never expose this service to the public internet. Compose attaches it to the external `credchain` network at `http://python:8081` and publishes port 8081 on host loopback (`127.0.0.1`) only.
 
 ## Stack
 
-Python 3.11 · FastAPI 0.115.5 · Uvicorn 0.32.1 · Google Gemini (genai 2.8.0) · EmbeddingGemma via sentence-transformers · torch 2.12.0 (CPU-only) · slowapi 0.1.9
+Python 3.11 · FastAPI 0.115.5 · Uvicorn 0.32.1 · Google Gemini (genai 2.8.0) · EmbeddingGemma via sentence-transformers · torch (CPU-only, unpinned Docker install) · slowapi 0.1.9
 
 ## Endpoints
 
@@ -19,7 +19,7 @@ Python 3.11 · FastAPI 0.115.5 · Uvicorn 0.32.1 · Google Gemini (genai 2.8.0) 
 
 All POST endpoints accept multiple files. Response shape: `{code, message, data, errors}`.
 `/verify` accepts an `embeddings` JSON form field (array of float arrays), one per file.
-POST endpoints require `X-API-Key` header (disabled when `API_KEY` is empty).
+When `API_KEY` is configured, middleware requires `X-API-Key` on every path except `/health`, including the POST endpoints. An empty `API_KEY` disables authentication.
 
 ### Verdicts
 
@@ -37,7 +37,8 @@ The service always runs in Docker, started by the orchestrator.
 ```bash
 cp .env.example .env.docker
 # Set GEMINI_API_KEY and HF_TOKEN
-make generate-api-key                 # writes API_KEY → .env.docker
+# Set API_KEY in this host .env.docker and the same value as Go's PYTHON_AI_API_KEY.
+# make generate-api-key prints a key, but its container-local file is discarded.
 
 # Start it (from the orchestrator repo):
 cd ../CredChain_Golang && make local-up     # full stack, or `make dev-up` for local hybrid
@@ -71,8 +72,8 @@ app/
 | Command | Purpose |
 |---|---|
 | `make check` | Ruff lint + Mypy + pytest (pre-push gate, runs in container) |
-| `make format` | Ruff format |
-| `make generate-api-key` | Generate a 64-char hex API key → `.env.docker` |
+| `make format` | Ruff format in a disposable container; no host-source mount, so edits do not persist to the checkout |
+| `make generate-api-key` | Print a 64-char hex API key; writes only the disposable container's `.env.docker` |
 
 Starting/stopping the service is done from the orchestrator (`CredChain_Golang`: `make local-up` / `make down` / `make dev-up`).
 
